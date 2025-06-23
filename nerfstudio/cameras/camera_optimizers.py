@@ -30,13 +30,14 @@ from torch import Tensor, nn
 from typing_extensions import assert_never
 
 from nerfstudio.cameras.cameras import Cameras
-from nerfstudio.cameras.lie_groups import exp_map_SE3, exp_map_SO3xR3
+from nerfstudio.cameras.lie_groups import exp_map_SE3, exp_map_SO3xR3, so2_experimental
 from nerfstudio.cameras.rays import RayBundle
 from nerfstudio.configs.base_config import InstantiateConfig
 from nerfstudio.engine.optimizers import OptimizerConfig
 from nerfstudio.engine.schedulers import SchedulerConfig
 from nerfstudio.utils import poses as pose_utils
-
+from collections import Counter
+from copy import deepcopy
 
 @dataclass
 class CameraOptimizerConfig(InstantiateConfig):
@@ -44,8 +45,11 @@ class CameraOptimizerConfig(InstantiateConfig):
 
     _target: Type = field(default_factory=lambda: CameraOptimizer)
 
-    mode: Literal["off", "SO3xR3", "SE3"] = "off"
+    mode: Literal["off", "SO3xR3", "SE3", "SO2"] = "off"
     """Pose optimization strategy to use. If enabled, we recommend SO3xR3."""
+
+    # Exposing the Index thing here
+    non_trainable_camera_indices: Optional[list[int]] = None 
 
     trans_l2_penalty: float = 1e-2
     """L2 penalty on translation parameters."""
@@ -103,10 +107,13 @@ class CameraOptimizer(nn.Module):
         self.device = device
         self.non_trainable_camera_indices = non_trainable_camera_indices
 
+        print("-"* 50)
+        print(f"Number of cameras: {num_cameras}")
+
         # Initialize learnable parameters.
         if self.config.mode == "off":
             pass
-        elif self.config.mode in ("SO3xR3", "SE3"):
+        elif self.config.mode in ("SO3xR3", "SE3", "SO2"):
             self.pose_adjustment = torch.nn.Parameter(torch.zeros((num_cameras, 6), device=device))
         else:
             assert_never(self.config.mode)
@@ -125,12 +132,17 @@ class CameraOptimizer(nn.Module):
         outputs = []
 
         # Apply learned transformation delta.
+        # print("RAY BUNDLE CAMERA Indicies :", len(indices), indices)
+        # print("Unique Indicies :", len(torch.unique(indices)), torch.unique(indices))
+        # print("BUNDLES FROM DIFF CAM:", Counter(indices.cpu().numpy()))
         if self.config.mode == "off":
             pass
         elif self.config.mode == "SO3xR3":
             outputs.append(exp_map_SO3xR3(self.pose_adjustment[indices, :]))
         elif self.config.mode == "SE3":
             outputs.append(exp_map_SE3(self.pose_adjustment[indices, :]))
+        elif self.config.mode == "SO2":
+            outputs.append(so2_experimental(self.pose_adjustment[indices, :]))
         else:
             assert_never(self.config.mode)
         # Detach non-trainable indices by setting to identity transform
@@ -138,6 +150,23 @@ class CameraOptimizer(nn.Module):
             if self.non_trainable_camera_indices.device != self.pose_adjustment.device:
                 self.non_trainable_camera_indices = self.non_trainable_camera_indices.to(self.pose_adjustment.device)
             outputs[0][self.non_trainable_camera_indices] = torch.eye(4, device=self.pose_adjustment.device)[:3, :4]
+
+        # Actual Skipping Code I am exposing
+        if self.config.non_trainable_camera_indices is not None:
+            non_trainable_camera_indices = deepcopy(self.config.non_trainable_camera_indices)
+            # print(f"Skipping {len(self.config.non_trainable_camera_indices)} cameras from pose adjustment")
+            # print(len(outputs))
+            # print(outputs[0].shape)
+            non_trainable_camera_indices = torch.tensor(
+                non_trainable_camera_indices, dtype=torch.int, device=self.pose_adjustment.device
+            )
+            indices = indices.to(self.pose_adjustment.device)
+            mask = torch.isin(indices, non_trainable_camera_indices)
+            non_trainable_camera_indices = torch.nonzero(mask, as_tuple=True)[0]
+            # print("NON-TRAINABLE CAMERA INDICES MOD: ", non_trainable_camera_indices.shape)
+            outputs[0][non_trainable_camera_indices] = torch.eye(4, device=self.pose_adjustment.device)[:3, :4]
+            # print("EYE SHAPE: ", torch.eye(4, device=self.pose_adjustment.device)[:3, :4].shape)
+            # print("NON-TRAINABLE INDICES: ", non_trainable_camera_indices)
 
         # Return: identity if no transforms are needed, otherwise multiply transforms together.
         if len(outputs) == 0:
