@@ -25,7 +25,6 @@ from PIL import Image
 
 from nerfstudio.cameras import camera_utils
 from nerfstudio.cameras.cameras import CAMERA_MODEL_TO_TYPE, Cameras, CameraType
-from nerfstudio.cameras.custom_cameras import CLCameras
 from nerfstudio.data.dataparsers.base_dataparser import DataParser, DataParserConfig, DataparserOutputs
 from nerfstudio.data.scene_box import SceneBox
 from nerfstudio.data.utils.dataparsers_utils import (

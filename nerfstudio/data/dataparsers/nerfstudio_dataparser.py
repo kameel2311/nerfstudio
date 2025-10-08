@@ -121,6 +121,9 @@ class Nerfstudio(DataParser):
         width = []
         distort = []
 
+        # Custom CLCameras Time Index
+        time_indices = []
+
         # sort the frames by fname
         fnames = []
         for frame in meta["frames"]:
@@ -181,6 +184,12 @@ class Nerfstudio(DataParser):
                 depth_filepath = Path(frame["depth_file_path"])
                 depth_fname = self._get_fname(depth_filepath, data_dir, downsample_folder_prefix="depths_")
                 depth_filenames.append(depth_fname)
+
+            # Parsing the time index for CLCameras
+            if "time_index" in frame:
+                time_indices.append(int(frame["time_index"]))
+            else:
+                time_indices.append(None)
 
         assert len(mask_filenames) == 0 or (len(mask_filenames) == len(image_filenames)), """
         Different number of image and mask filenames.
@@ -292,6 +301,18 @@ class Nerfstudio(DataParser):
         else:
             distortion_params = torch.stack(distort, dim=0)[idx_tensor]
 
+        # Paring the Times for CLCameras
+        if None in time_indices:
+            time_filtered_indices = [ti for ti in time_indices if ti is not None]
+            if len(time_filtered_indices) > 0:
+                CONSOLE.log(f"[bold yellow] Some time indices are missing, so not using time conditioning.")
+                raise ValueError("Some time indices are missing, Transforms contains a mix of None and time indices.")
+            time_indices = None
+            CONSOLE.log(f"[bold yellow] Time indices not found, so not using time conditioning.")
+        else:
+            time_indices = torch.tensor(time_indices, dtype=torch.int32)[idx_tensor].unsqueeze(-1)
+            CONSOLE.log(f"[bold yellow] Using time conditioning with indices.")
+
         # Only add fisheye crop radius parameter if the images are actually fisheye, to allow the same config to be used
         # for both fisheye and non-fisheye datasets.
         metadata = {}
@@ -309,6 +330,7 @@ class Nerfstudio(DataParser):
             camera_to_worlds=poses[:, :3, :4],
             camera_type=camera_type,
             metadata=metadata,
+            times=time_indices,
         )
 
         assert self.downscale_factor is not None
